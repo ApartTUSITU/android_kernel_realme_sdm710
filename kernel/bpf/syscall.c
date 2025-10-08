@@ -1846,8 +1846,6 @@ out_free_tp:
 static int bpf_prog_attach(const union bpf_attr *attr)
 {
 	enum bpf_prog_type ptype;
-	struct bpf_prog *prog;
-	int ret;
 
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
@@ -1885,15 +1883,12 @@ static int bpf_prog_attach(const union bpf_attr *attr)
 		ptype = BPF_PROG_TYPE_CGROUP_DEVICE;
 		break;
 	case BPF_SK_MSG_VERDICT:
-		ptype = BPF_PROG_TYPE_SK_MSG;
-		break;
+		return sockmap_get_from_fd(attr, BPF_PROG_TYPE_SK_MSG, NULL);
 	case BPF_SK_SKB_STREAM_PARSER:
 	case BPF_SK_SKB_STREAM_VERDICT:
-		ptype = BPF_PROG_TYPE_SK_SKB;
-		break;
+		return sockmap_get_from_fd(attr, BPF_PROG_TYPE_SK_SKB, NULL);
 	case BPF_FLOW_DISSECTOR:
-		ptype = BPF_PROG_TYPE_FLOW_DISSECTOR;
-		break;
+		return skb_flow_dissector_bpf_prog_attach(attr);
 	case BPF_CGROUP_SYSCTL:
 		ptype = BPF_PROG_TYPE_CGROUP_SYSCTL;
 		break;
@@ -1905,28 +1900,7 @@ static int bpf_prog_attach(const union bpf_attr *attr)
 		return -EINVAL;
 	}
 
-	prog = bpf_prog_get_type(attr->attach_bpf_fd, ptype);
-	if (IS_ERR(prog))
-		return PTR_ERR(prog);
-
-	if (bpf_prog_attach_check_attach_type(prog, attr->attach_type)) {
-		bpf_prog_put(prog);
-		return -EINVAL;
-	}
-
-	switch (ptype) {
-	case BPF_PROG_TYPE_SK_SKB:
-	case BPF_PROG_TYPE_SK_MSG:
-		ret = sockmap_get_from_fd(attr, ptype, prog);
-		break;
-	default:
-		ret = cgroup_bpf_prog_attach(attr, ptype, prog);
-	}
-
-	if (ret)
-		bpf_prog_put(prog);
-
-	return ret;
+	return cgroup_bpf_prog_attach(attr, ptype);
 }
 #define BPF_PROG_DETACH_LAST_FIELD attach_type
 
@@ -1939,6 +1913,18 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 
 	if (CHECK_ATTR(BPF_PROG_DETACH))
 		return -EINVAL;
+
+	switch (attr->attach_type) {
+	case BPF_SK_MSG_VERDICT:
+		return sockmap_get_from_fd(attr, BPF_PROG_TYPE_SK_MSG, NULL);
+	case BPF_SK_SKB_STREAM_PARSER:
+	case BPF_SK_SKB_STREAM_VERDICT:
+		return sockmap_get_from_fd(attr, BPF_PROG_TYPE_SK_SKB, NULL);
+	case BPF_FLOW_DISSECTOR:
+		return skb_flow_dissector_bpf_prog_detach(attr);
+	default:
+		break;
+	}
 
 	switch (attr->attach_type) {
 	case BPF_CGROUP_INET_INGRESS:
@@ -1966,18 +1952,11 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 	case BPF_CGROUP_DEVICE:
 		ptype = BPF_PROG_TYPE_CGROUP_DEVICE;
 		break;
-	case BPF_SK_MSG_VERDICT:
-		return sockmap_get_from_fd(attr, BPF_PROG_TYPE_SK_MSG, NULL);
-	case BPF_SK_SKB_STREAM_PARSER:
-	case BPF_SK_SKB_STREAM_VERDICT:
-		return sockmap_get_from_fd(attr, BPF_PROG_TYPE_SK_SKB, NULL);
-	case BPF_FLOW_DISSECTOR:
- 		return skb_flow_dissector_bpf_prog_detach(attr);
 	case BPF_CGROUP_SYSCTL:
 		ptype = BPF_PROG_TYPE_CGROUP_SYSCTL;
 		break;
-	case BPF_CGROUP_GETSOCKOPT:
 	case BPF_CGROUP_SETSOCKOPT:
+	case BPF_CGROUP_GETSOCKOPT:
 		ptype = BPF_PROG_TYPE_CGROUP_SOCKOPT;
 		break;
 	default:
@@ -2016,12 +1995,10 @@ static int bpf_prog_query(const union bpf_attr *attr,
 	case BPF_CGROUP_SYSCTL:
 	case BPF_CGROUP_GETSOCKOPT:
 	case BPF_CGROUP_SETSOCKOPT:
-		break;
+		return cgroup_bpf_prog_query(attr, uattr);
 	default:
 		return -EINVAL;
 	}
-
-	return cgroup_bpf_prog_query(attr, uattr);
 }
 
 #define BPF_PROG_TEST_RUN_LAST_FIELD test.duration
@@ -2653,49 +2630,21 @@ SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, siz
 	case BPF_CGROUP_INET6_POST_BIND:
 		ptype = BPF_PROG_TYPE_CGROUP_SOCK;
 		break;
-	case BPF_PROG_ATTACH:
-		err = bpf_prog_attach(&attr);
-		break;
-	case BPF_PROG_DETACH:
-		err = bpf_prog_detach(&attr);
-		break;
-	case BPF_PROG_QUERY:
-		err = bpf_prog_query(&attr, uattr);
-		break;
-	case BPF_PROG_TEST_RUN:
-		err = bpf_prog_test_run(&attr, uattr);
-		break;
-	case BPF_PROG_GET_NEXT_ID:
-		err = bpf_obj_get_next_id(&attr, uattr,
-					  &prog_idr, &prog_idr_lock);
-		break;
-	case BPF_MAP_GET_NEXT_ID:
-		err = bpf_obj_get_next_id(&attr, uattr,
-					  &map_idr, &map_idr_lock);
-		break;
-	case BPF_PROG_GET_FD_BY_ID:
-		err = bpf_prog_get_fd_by_id(&attr);
-		break;
-	case BPF_MAP_GET_FD_BY_ID:
-		err = bpf_map_get_fd_by_id(&attr);
-		break;
-	case BPF_OBJ_GET_INFO_BY_FD:
-		err = bpf_obj_get_info_by_fd(&attr, uattr);
-		break;
-	case BPF_RAW_TRACEPOINT_OPEN:
- 		err = bpf_raw_tracepoint_open(&attr);
- 		break;
-	case BPF_BTF_LOAD:
-		err = bpf_btf_load(&attr);
-		break;
-	case BPF_BTF_GET_FD_BY_ID:
-		err = bpf_btf_get_fd_by_id(&attr);
-		break;
-	case BPF_MAP_LOOKUP_AND_DELETE_ELEM:
-		err = map_lookup_and_delete_elem(&attr);
-		break;
 	default:
-		err = -EINVAL;
+		switch (cmd) {
+		case BPF_PROG_ATTACH:
+			err = bpf_prog_attach(&attr);
+			break;
+		case BPF_PROG_DETACH:
+			err = bpf_prog_detach(&attr);
+			break;
+		case BPF_PROG_QUERY:
+			err = bpf_prog_query(&attr, uattr);
+			break;
+		default:
+			err = -EINVAL;
+			break;
+		}
 		break;
 	}
 
